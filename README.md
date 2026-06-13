@@ -2,7 +2,7 @@
 
 面向 Windows 的 B 站直播事件 EMS 控制台。程序使用 Python、Vue 3 和 pywebview 开发，可以监听指定直播间，并根据弹幕、点赞、礼物、上舰等事件控制多台役次元一代或二代双通道设备。
 
-当前版本：`v1.1.0`。完整变更参见 [CHANGELOG.md](CHANGELOG.md)。
+当前版本：`v1.1.1`。面向普通用户的完整中文操作教程参见 [USER_GUIDE.zh-CN.md](USER_GUIDE.zh-CN.md)，版本变更参见 [CHANGELOG.md](CHANGELOG.md)。
 
 程序使用内置 WebView2 窗口，不依赖外部浏览器。关闭窗口或点击“退出程序”时，会停止所有通道输出并主动断开蓝牙设备。
 
@@ -52,6 +52,7 @@ YCY-Bililive-EMS\YCY-Bililive-EMS.exe
 2. 不要运行 `build`、`.build-cache` 等构建目录中的文件。
 3. Windows 需要安装 Microsoft Edge WebView2 Runtime。Windows 10/11 通常已经自带。
 4. 第一次启动时，Windows Defender 可能需要几秒钟检查未签名程序。
+5. 解压后的 `USER_GUIDE.zh-CN.md` 包含逐项配置、运行逻辑和故障排查，建议首次使用前完整阅读。
 
 ## 首次配置
 

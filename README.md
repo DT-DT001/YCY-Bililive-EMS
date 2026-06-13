@@ -284,7 +284,7 @@ npm run dev
 
 ## 构建 Windows 免安装版
 
-确认 Python 和 Node.js 已加入 PATH，并已安装项目依赖：
+确认 Python 3.12 和 Node.js 已加入 PATH，并已安装项目依赖。发布包不要使用 Python 3.13 或 3.14 构建：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
@@ -306,6 +306,17 @@ release\YCY-Bililive-EMS-Windows-x64.zip
 ```
 
 发布时应上传 `release\YCY-Bililive-EMS-Windows-x64.zip`，不要只上传 EXE。
+
+## 启动兼容模式
+
+如果当前 Windows 的 .NET Framework、WebView2 或 pythonnet 组件无法加载，程序会自动在默认浏览器中打开兼容模式，不再直接崩溃。兼容模式下功能不变，使用结束后需要点击页面中的“退出程序”来停止后台服务并断开设备。
+
+也可以手动启用：
+
+```powershell
+$env:YCY_BROWSER_MODE = "1"
+.\YCY-Bililive-EMS.exe
+```
 
 ## 测试
 

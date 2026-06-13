@@ -4,7 +4,19 @@ $npm = Get-Command "npm.cmd" -ErrorAction SilentlyContinue
 if (-not $npm) {
   $npm = Get-Command "npm" -ErrorAction Stop
 }
-$python = Get-Command "python" -ErrorAction Stop
+$pythonCommand = if ($env:YCY_BUILD_PYTHON) {
+  $env:YCY_BUILD_PYTHON
+} else {
+  "python"
+}
+$python = Get-Command $pythonCommand -ErrorAction Stop
+$pythonVersion = & $python.Source -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"
+if ($LASTEXITCODE -ne 0) {
+  throw "Unable to read the Python version."
+}
+if ($pythonVersion -ne "3.12") {
+  throw "Windows release builds require Python 3.12. Current version: $pythonVersion"
+}
 
 & $npm.Source run build
 $staticPath = (Resolve-Path "backend/static").Path

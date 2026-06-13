@@ -1,5 +1,14 @@
 # 更新日志
 
+## v1.1.2 - 2026-06-13
+
+### 启动兼容性
+
+- 修复部分电脑加载 `Python.Runtime.dll` 失败后程序直接崩溃的问题。
+- 内置窗口因 .NET Framework、WebView2 或 pythonnet 环境不兼容而无法启动时，自动打开浏览器兼容模式，直播监听和设备控制功能保持可用。
+- 支持设置环境变量 `YCY_BROWSER_MODE=1` 手动使用浏览器兼容模式。
+- Windows 发布构建固定使用 Python 3.12、pywebview 6.2.1、pythonnet 3.0.5 和 PyInstaller 6.20.0，避免较新 Python 构建链在不同系统上的兼容性差异。
+
 ## v1.1.1 - 2026-06-13
 
 ### 一代设备协议

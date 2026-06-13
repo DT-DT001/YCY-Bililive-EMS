@@ -1,5 +1,6 @@
 aiohttp>=3.10,<4
 bilibili-api-python==17.4.1
 bleak>=1.0,<2
-pywebview>=5.4,<7
-pyinstaller>=6.0,<7
+pywebview==6.2.1
+pythonnet==3.0.5
+pyinstaller==6.20.0

@@ -23,10 +23,18 @@ def generation1_control(
     strength: int,
     frequency: int,
     pulse_width: int,
+    mode: int = 0x11,
 ) -> bytes:
     channel_code = {"A": 1, "B": 2, "AB": 3}[channel]
     strength = max(0, min(276, strength))
+    if mode == 0x11 and pulse_width <= 0:
+        strength = 0
     enabled = int(strength > 0)
+    if not enabled:
+        return with_checksum(
+            [0x35, 0x11, channel_code, 0, 0, 0, 0, 1, 0]
+        )
+    fixed_mode = max(1, min(16, mode)) if mode != 0x11 else 0x11
     return with_checksum(
         [
             0x35,
@@ -35,9 +43,30 @@ def generation1_control(
             enabled,
             strength >> 8,
             strength & 0xFF,
+            fixed_mode,
+            max(1, min(100, frequency)) if fixed_mode == 0x11 else 0,
+            max(0, min(100, pulse_width)) if fixed_mode == 0x11 else 0,
+        ]
+    )
+
+
+def generation2_fixed(
+    a_strength: int,
+    a_mode: int,
+    b_strength: int,
+    b_mode: int,
+) -> bytes:
+    return with_checksum(
+        [
+            0x35,
             0x11,
-            max(1, min(100, frequency)),
-            max(0, min(100, pulse_width)),
+            0x01,
+            max(0, min(276, a_strength)) >> 8,
+            max(0, min(276, a_strength)) & 0xFF,
+            max(1, min(16, a_mode)),
+            max(0, min(276, b_strength)) >> 8,
+            max(0, min(276, b_strength)) & 0xFF,
+            max(1, min(16, b_mode)),
         ]
     )
 
@@ -99,4 +128,3 @@ def parse_notification(data: bytes) -> ChannelReport | dict[str, int] | None:
     if response_type == 0x55 and len(data) >= 5:
         return {"error": data[3]}
     return None
-

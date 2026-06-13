@@ -143,15 +143,26 @@ def normalize_message(message: dict[str, Any]) -> LiveEvent | None:
 
 
 class BilibiliListener:
-    def __init__(self, on_event: EventCallback, on_status: StatusCallback) -> None:
+    def __init__(
+        self,
+        on_event: EventCallback,
+        on_status: StatusCallback,
+        client_factory=live.LiveDanmaku,
+        retry_base: float = 1.0,
+    ) -> None:
         self.on_event = on_event
         self.on_status = on_status
+        self._client_factory = client_factory
         self.room_id = ""
         self.connected = False
         self.connecting = False
         self.error = ""
         self._client: live.LiveDanmaku | None = None
         self._task: asyncio.Task[None] | None = None
+        self._reconnect_event: asyncio.Event | None = None
+        self._stop_requested = True
+        self._retry_base = max(0.01, retry_base)
+        self._retry_delay = self._retry_base
 
     async def start(self, room_id: str) -> None:
         await self.stop()
@@ -161,25 +172,29 @@ class BilibiliListener:
         self.connecting = True
         self.connected = False
         self.error = ""
+        self._stop_requested = False
         await self.on_status(self.snapshot())
-        self._client = live.LiveDanmaku(
-            int(self.room_id),
-            max_retry=10,
-            retry_after=2,
-        )
-        self._register_handlers(self._client)
-        self._task = asyncio.create_task(self._run())
+        self._task = asyncio.create_task(self._run_forever())
 
-    def _register_handlers(self, client: live.LiveDanmaku) -> None:
+    def _register_handlers(
+        self,
+        client: live.LiveDanmaku,
+        reconnect_event: asyncio.Event,
+    ) -> None:
         @client.on("VERIFICATION_SUCCESSFUL")
         async def verification_successful(_event: dict) -> None:
+            if client is not self._client:
+                return
             self.connected = True
             self.connecting = False
             self.error = ""
+            self._retry_delay = self._retry_base
             await self.on_status(self.snapshot())
 
         @client.on("ALL")
         async def all_events(event: dict) -> None:
+            if client is not self._client:
+                return
             raw = event.get("data")
             if not isinstance(raw, dict):
                 return
@@ -189,41 +204,93 @@ class BilibiliListener:
 
         @client.on("TIMEOUT")
         async def timeout(_event: dict) -> None:
+            if client is not self._client or self._stop_requested:
+                return
             self.connected = False
             self.connecting = True
             self.error = "直播间心跳超时，正在自动重连"
             await self.on_status(self.snapshot())
+            reconnect_event.set()
 
-    async def _run(self) -> None:
+    async def _disconnect_client(self, client: live.LiveDanmaku) -> None:
         try:
-            assert self._client is not None
-            await self._client.connect()
-            if not self.connected:
-                self.connecting = False
-                self.error = self._client.err_reason or "直播间连接已结束"
-                await self.on_status(self.snapshot())
-        except asyncio.CancelledError:
+            await asyncio.wait_for(client.disconnect(), timeout=3)
+        except Exception:
             pass
-        except Exception as exc:
+
+    async def _run_forever(self) -> None:
+        self._retry_delay = self._retry_base
+        while not self._stop_requested:
+            reconnect_event = asyncio.Event()
+            self._reconnect_event = reconnect_event
+            client = self._client_factory(
+                int(self.room_id),
+                max_retry=2,
+                retry_after=2,
+            )
+            self._client = client
+            self._register_handlers(client, reconnect_event)
+            connect_task = asyncio.create_task(client.connect())
+            reconnect_task = asyncio.create_task(reconnect_event.wait())
+            try:
+                done, _ = await asyncio.wait(
+                    (connect_task, reconnect_task),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if reconnect_task in done and not self._stop_requested:
+                    await self._disconnect_client(client)
+                    if not connect_task.done():
+                        connect_task.cancel()
+                elif connect_task in done:
+                    await connect_task
+                    if not self._stop_requested and not self.error:
+                        self.error = client.err_reason or "直播间连接已结束"
+            except asyncio.CancelledError:
+                connect_task.cancel()
+                reconnect_task.cancel()
+                await self._disconnect_client(client)
+                break
+            except Exception as exc:
+                if not self._stop_requested:
+                    self.error = str(exc) or type(exc).__name__
+            finally:
+                for task in (connect_task, reconnect_task):
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(
+                    connect_task,
+                    reconnect_task,
+                    return_exceptions=True,
+                )
+
+            if self._stop_requested:
+                break
             self.connected = False
-            self.connecting = False
-            self.error = str(exc) or type(exc).__name__
+            self.connecting = True
+            if not self.error:
+                self.error = "直播间连接中断，正在自动重连"
             await self.on_status(self.snapshot())
+            try:
+                await asyncio.sleep(self._retry_delay)
+            except asyncio.CancelledError:
+                break
+            self._retry_delay = min(30.0, self._retry_delay * 2)
 
     async def stop(self) -> None:
+        self._stop_requested = True
+        if self._reconnect_event:
+            self._reconnect_event.set()
         client = self._client
         self._client = None
-        if client and client.get_status() == client.STATUS_ESTABLISHED:
-            try:
-                await client.disconnect()
-            except Exception:
-                pass
+        if client:
+            await self._disconnect_client(client)
         if self._task:
             self._task.cancel()
             await asyncio.gather(self._task, return_exceptions=True)
             self._task = None
         self.connected = False
         self.connecting = False
+        self.error = ""
         await self.on_status(self.snapshot())
 
     def snapshot(self) -> dict:

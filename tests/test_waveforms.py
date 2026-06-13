@@ -10,14 +10,9 @@ class WaveformTests(unittest.TestCase):
     def test_twelve_builtins(self):
         waves = builtin_waveforms()
         self.assertEqual(len(waves), 12)
-        self.assertTrue(all(len(wave.points) == 20 for wave in waves.values()))
-        self.assertTrue(
-            all(
-                wave.points[0].pulse_width
-                == min(point.pulse_width for point in wave.points)
-                for wave in waves.values()
-            )
-        )
+        self.assertTrue(all(len(wave.points) == 60 for wave in waves.values()))
+        self.assertEqual(waves["连击"].points[0].frequency, 100)
+        self.assertEqual(waves["压缩"].points[0].pulse_width, 100)
 
     def test_json_import(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -52,7 +47,7 @@ class WaveformTests(unittest.TestCase):
             wave = import_waveform(path)
             self.assertEqual(len(wave.points), 1)
             self.assertEqual(wave.points[0].frequency, 100)
-            self.assertEqual(wave.points[0].pulse_width, 45)
+            self.assertEqual(wave.points[0].pulse_width, 30)
 
     def test_coyote_v3_compressed_period_is_converted_to_hz(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -62,7 +57,7 @@ class WaveformTests(unittest.TestCase):
             self.assertEqual(wave.points[0].frequency, 5)
             self.assertEqual(wave.points[0].pulse_width, 100)
 
-    def test_coyote_v2_burst_count_is_preserved_by_global_normalization(self):
+    def test_coyote_v2_uses_official_z_times_five_strength_mapping(self):
         def encode(x, y, z):
             packed = x | (y << 5) | (z << 15)
             return packed.to_bytes(3, "little").hex()
@@ -76,7 +71,55 @@ class WaveformTests(unittest.TestCase):
             wave = import_waveform(path)
             self.assertEqual(
                 [(point.frequency, point.pulse_width) for point in wave.points],
-                [(100, 20), (10, 100)],
+                [(100, 100), (10, 100)],
+            )
+
+    def test_coyote_v2_zero_strength_is_preserved_as_silence(self):
+        def encode(x, y, z):
+            packed = x | (y << 5) | (z << 15)
+            return packed.to_bytes(3, "little").hex()
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "wave.pulse"
+            path.write_text(encode(1, 9, 0), "utf-8")
+            wave = import_waveform(path)
+            self.assertEqual(
+                (wave.points[0].frequency, wave.points[0].pulse_width),
+                (1, 0),
+            )
+
+    def test_dungeonlab_section_format_uses_period_table_and_duration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "section.pulse"
+            path.write_text(
+                "Dungeonlab+pulse:0,1,1=0,20,19,2,1/10.00-1,20.00-0",
+                "utf-8",
+            )
+            wave = import_waveform(path)
+
+            self.assertEqual(wave.source, "郊狼 PULSE（原生小节格式）")
+            self.assertEqual(len(wave.points), 20)
+            self.assertEqual(
+                [(point.frequency, point.pulse_width) for point in wave.points[:2]],
+                [(100, 10), (91, 20)],
+            )
+            self.assertEqual(wave.points[-1].frequency, 34)
+
+    def test_dungeonlab_section_format_skips_disabled_sections(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "section.pulse"
+            path.write_text(
+                "Dungeonlab+pulse:0,1,2="
+                "0,20,0,1,1/25.00-1"
+                "+section+0,20,20,1,0/100.00-1",
+                "utf-8",
+            )
+            wave = import_waveform(path)
+
+            self.assertEqual(len(wave.points), 1)
+            self.assertEqual(
+                (wave.points[0].frequency, wave.points[0].pulse_width),
+                (100, 25),
             )
 
 

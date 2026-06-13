@@ -242,6 +242,21 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(self.scheduler.output.history.count(0), 2)
         self.assertEqual(self.scheduler.output.history[-1], 0)
 
+    async def test_fixed_waveform_history_is_cleared_when_output_finishes(self):
+        rule = self.rule("fixed", 20, duration=0.12, rate=0)
+        rule.waveforms = ["潮汐"]
+
+        await self.scheduler.trigger(rule, 0)
+        await asyncio.sleep(0.15)
+        self.assertEqual(self.scheduler.output.mode, 1)
+        await asyncio.sleep(0.15)
+
+        self.assertEqual(self.scheduler.output.strength, 0)
+        self.assertTrue(all(value == 0 for value in self.scheduler.output.history))
+        self.assertTrue(
+            all(value == 0 for value in self.scheduler.output.frequency_history)
+        )
+
     async def test_stop_cancels_active_output_and_clears_queue(self):
         await self.scheduler.trigger(self.rule("gift", 40, duration=5), 10)
         await asyncio.sleep(0.12)
@@ -262,6 +277,30 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
             self.scheduler._advance_waveform(task)
             selected.append(task.waveform)
         self.assertEqual(selected, ["心跳", "潮汐", "连击", "心跳"])
+
+    async def test_builtin_waveform_reports_protocol_fixed_mode(self):
+        rule = self.rule("builtin", 20)
+        rule.waveforms = ["潮汐"]
+        await self.scheduler.trigger(rule, 0)
+        await asyncio.sleep(0.12)
+        self.assertEqual(self.scheduler.output.mode, 1)
+        self.assertTrue(self.scheduler.output.frequency_history)
+        self.assertEqual(
+            self.scheduler.output.frequency_history[-1],
+            self.scheduler.output.frequency,
+        )
+
+    async def test_imported_waveform_reports_realtime_mode(self):
+        self.scheduler.waveforms["imported"] = Waveform(
+            "imported",
+            [WavePoint(20, 30)],
+            source="json",
+        )
+        rule = self.rule("imported", 20)
+        rule.waveforms = ["imported"]
+        await self.scheduler.trigger(rule, 0)
+        await asyncio.sleep(0.12)
+        self.assertEqual(self.scheduler.output.mode, 0x11)
 
 
 if __name__ == "__main__":

@@ -97,13 +97,25 @@ function ensureOutputs() {
       device.outputs[channel] ||= {
         strength: 0, remaining: 0, total_remaining: 0, waveform: "", frequency: 1,
         pulse_width: 0, event_name: "", queue_size: 0, history: [],
+        frequency_history: [],
       };
     }
   }
 }
 
-function chartKey(deviceId, channel) {
-  return `${deviceId}::${channel}`;
+function mergeDeviceState(devices) {
+  const previousOutputs = new Map(
+    state.devices.map((device) => [device.id, device.outputs]),
+  );
+  state.devices = devices.map((device) => ({
+    ...device,
+    outputs: previousOutputs.get(device.id) || device.outputs,
+  }));
+  ensureOutputs();
+}
+
+function chartKey(deviceId, channel, metric) {
+  return `${deviceId}::${channel}::${metric}`;
 }
 
 function normalizeHistory(history) {
@@ -122,13 +134,39 @@ function createChartStream(history) {
   };
 }
 
+function isFixedOutput(output) {
+  return output?.strength > 0 && output?.mode >= 1 && output?.mode <= 16;
+}
+
+function clearChartChannel(deviceId, channel) {
+  const now = performance.now();
+  for (const metric of ["pulse", "frequency"]) {
+    chartStreams.set(chartKey(deviceId, channel, metric), {
+      values: Array(chartPointCount).fill(0),
+      pending: [],
+      lastAdvance: now,
+      activeUntil: now,
+    });
+  }
+  requestChartRender();
+}
+
 function seedChartStreams() {
   for (const device of state.devices) {
     for (const channel of ["A", "B"]) {
-      const key = chartKey(device.id, channel);
-      if (!chartStreams.has(key)) {
-        const history = device.outputs?.[channel]?.history;
-        chartStreams.set(key, createChartStream(history));
+      const output = device.outputs?.[channel];
+      if (isFixedOutput(output)) {
+        clearChartChannel(device.id, channel);
+        continue;
+      }
+      for (const [metric, history] of [
+        ["pulse", output?.history],
+        ["frequency", output?.frequency_history],
+      ]) {
+        const key = chartKey(device.id, channel, metric);
+        if (!chartStreams.has(key)) {
+          chartStreams.set(key, createChartStream(history));
+        }
       }
     }
   }
@@ -190,7 +228,7 @@ function drawGrid(context, width, height) {
   context.stroke();
 }
 
-function drawWaveLine(context, frame, width, height, color) {
+function drawWaveLine(context, frame, width, height, color, dashed = false) {
   const { values, next, progress } = frame;
   const stepX = width / Math.max(1, chartPointCount - 1);
   const points = [...values, next].map((rawValue, index) => {
@@ -210,6 +248,7 @@ function drawWaveLine(context, frame, width, height, color) {
   context.lineJoin = "round";
   context.shadowColor = color;
   context.shadowBlur = 3;
+  context.setLineDash(dashed ? [5, 4] : []);
   context.beginPath();
   context.moveTo(points[0].x, points[0].y);
   for (let index = 1; index < points.length - 1; index++) {
@@ -225,6 +264,7 @@ function drawWaveLine(context, frame, width, height, color) {
   const final = points[points.length - 1];
   context.lineTo(final.x, final.y);
   context.stroke();
+  context.setLineDash([]);
   context.restore();
 }
 
@@ -244,8 +284,10 @@ function drawDeviceChart(deviceId, now) {
   context.setTransform(ratio, 0, 0, ratio, 0, 0);
   context.clearRect(0, 0, bounds.width, bounds.height);
   drawGrid(context, bounds.width, bounds.height);
-  const streamA = chartStreams.get(chartKey(deviceId, "A"));
-  const streamB = chartStreams.get(chartKey(deviceId, "B"));
+  const pulseA = chartStreams.get(chartKey(deviceId, "A", "pulse"));
+  const frequencyA = chartStreams.get(chartKey(deviceId, "A", "frequency"));
+  const pulseB = chartStreams.get(chartKey(deviceId, "B", "pulse"));
+  const frequencyB = chartStreams.get(chartKey(deviceId, "B", "frequency"));
   const flat = {
     values: Array(chartPointCount).fill(0),
     next: 0,
@@ -253,22 +295,51 @@ function drawDeviceChart(deviceId, now) {
   };
   drawWaveLine(
     context,
-    streamA ? renderChartStream(streamA, now) : flat,
+    pulseA ? renderChartStream(pulseA, now) : flat,
     bounds.width,
     bounds.height,
     "#b98aff",
   );
   drawWaveLine(
     context,
-    streamB ? renderChartStream(streamB, now) : flat,
+    frequencyA ? renderChartStream(frequencyA, now) : flat,
+    bounds.width,
+    bounds.height,
+    "rgba(185,138,255,.52)",
+    true,
+  );
+  drawWaveLine(
+    context,
+    pulseB ? renderChartStream(pulseB, now) : flat,
     bounds.width,
     bounds.height,
     "#52d9dc",
   );
+  drawWaveLine(
+    context,
+    frequencyB ? renderChartStream(frequencyB, now) : flat,
+    bounds.width,
+    bounds.height,
+    "rgba(82,217,220,.48)",
+    true,
+  );
+  const device = state.devices.find((item) => item.id === deviceId);
+  const fixedActive = ["A", "B"].some((channel) => {
+    const output = device?.outputs?.[channel];
+    return output?.strength > 0 && output?.mode >= 1 && output?.mode <= 16;
+  });
+  if (fixedActive) {
+    context.save();
+    context.fillStyle = "rgba(205, 185, 235, .62)";
+    context.font = "10px 'Microsoft YaHei UI', sans-serif";
+    context.textAlign = "right";
+    context.fillText("固定模式参考 · 实线脉冲 / 虚线频率", bounds.width - 8, 14);
+    context.restore();
+  }
 }
 
-function updateChartTarget(deviceId, channel, history) {
-  const key = chartKey(deviceId, channel);
+function updateChartMetric(deviceId, channel, metric, history) {
+  const key = chartKey(deviceId, channel, metric);
   const target = normalizeHistory(history);
   const now = performance.now();
   let stream = chartStreams.get(key);
@@ -286,14 +357,28 @@ function updateChartTarget(deviceId, channel, history) {
   requestChartRender();
 }
 
+function updateChartTarget(deviceId, channel, output, previousOutput) {
+  if (isFixedOutput(output)) {
+    if (!isFixedOutput(previousOutput)) clearChartChannel(deviceId, channel);
+    return;
+  }
+  if (isFixedOutput(previousOutput)) clearChartChannel(deviceId, channel);
+  updateChartMetric(deviceId, channel, "pulse", output.history);
+  updateChartMetric(
+    deviceId,
+    channel,
+    "frequency",
+    output.frequency_history,
+  );
+}
+
 function connectSocket() {
   socket = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
   socket.onmessage = ({ data }) => {
     const message = JSON.parse(data);
     if (message.type === "snapshot") applySnapshot(message.data);
     if (message.type === "devices") {
-      state.devices = message.data;
-      ensureOutputs();
+      mergeDeviceState(message.data);
       seedChartStreams();
     }
     if (message.type === "listener") state.listener = message.data;
@@ -313,7 +398,8 @@ function connectSocket() {
         updateChartTarget(
           message.data.device_id,
           message.data.channel,
-          message.data.output.history,
+          message.data.output,
+          device.outputs?.[message.data.channel],
         );
         device.outputs[message.data.channel] = message.data.output;
       }
@@ -530,6 +616,42 @@ function displayStrength(value) {
   return Number.isInteger(strength) ? String(strength) : strength.toFixed(1);
 }
 
+function activeFixedChannels(device) {
+  return ["A", "B"].filter((channel) => {
+    const output = device.outputs?.[channel];
+    return output?.strength > 0 && output?.mode >= 1 && output?.mode <= 16;
+  });
+}
+
+function hasCustomOutput(device) {
+  return ["A", "B"].some((channel) => {
+    const output = device.outputs?.[channel];
+    return output?.strength > 0 && output?.mode === 0x11;
+  });
+}
+
+function showFixedStatus(device) {
+  return activeFixedChannels(device).length > 0 && !hasCustomOutput(device);
+}
+
+function displaySignalInfo(output) {
+  if (!output || output.strength <= 0) return "--";
+  if (output.mode >= 1 && output.mode <= 16) {
+    return `M${output.mode}`;
+  }
+  return `${output.frequency || 0} / ${output.pulse_width || 0}`;
+}
+
+function wavePath(points, key) {
+  const values = (points || []).slice(0, 60);
+  if (!values.length) return "";
+  return values.map((point, index) => {
+    const x = values.length === 1 ? 0 : index * 100 / (values.length - 1);
+    const y = 100 - Math.max(0, Math.min(100, point[key] || 0));
+    return `${x.toFixed(2)},${y.toFixed(2)}`;
+  }).join(" ");
+}
+
 function eventLabel(event) {
   return eventNames[event.event_type] || event.event_type;
 }
@@ -625,13 +747,30 @@ onBeforeUnmount(() => {
                 <div><span class="device-index">0{{ index + 1 }}</span><h2>{{ device.name }}</h2></div>
                 <span class="badge" :class="{ online: device.connected }">{{ device.connected ? `${device.generation}代 · 在线` : "离线" }}</span>
               </div>
-              <canvas :ref="setChartCanvas" :data-device-id="device.id" class="wave-chart"></canvas>
+              <div v-if="showFixedStatus(device)" class="fixed-output">
+                <div
+                  v-for="channel in activeFixedChannels(device)"
+                  :key="channel"
+                  class="fixed-output-channel"
+                  :class="`fixed-${channel.toLowerCase()}`"
+                >
+                  <span>{{ channel }} 通道 · 固定模式 {{ device.outputs[channel].mode }}</span>
+                  <strong>{{ device.outputs[channel].waveform }}</strong>
+                  <b>强度 {{ displayStrength(device.outputs[channel].strength) }}</b>
+                </div>
+              </div>
+              <canvas
+                v-else
+                :ref="setChartCanvas"
+                :data-device-id="device.id"
+                class="wave-chart"
+              ></canvas>
               <div class="channel-row" v-for="channel in ['A','B']" :key="channel">
                 <b :class="`channel-${channel.toLowerCase()}`">{{ channel }}</b>
                 <div><small>实时强度</small><strong>{{ displayStrength(device.outputs?.[channel]?.strength) }}</strong></div>
                 <div><small>当前波形</small><strong>{{ device.outputs?.[channel]?.waveform || "待机" }}</strong></div>
                 <div><small>剩余时间</small><strong>{{ displayTime(device.outputs?.[channel]?.total_remaining) }}</strong></div>
-                <div><small>频率 / 脉宽</small><strong>{{ device.outputs?.[channel]?.frequency || 0 }} / {{ device.outputs?.[channel]?.pulse_width || 0 }}</strong></div>
+                <div><small>输出参数</small><strong>{{ displaySignalInfo(device.outputs?.[channel]) }}</strong></div>
               </div>
             </article>
             <div v-if="!state.devices.length" class="empty panel">
@@ -743,13 +882,16 @@ onBeforeUnmount(() => {
 
       <section v-else class="content-page">
         <div class="page-toolbar panel">
-          <div><h2>波形库</h2><p>支持役次元 JSON 和郊狼 PULSE 文件，最多读取前 100 组频率/脉宽。</p></div>
+          <div><h2>波形库</h2><p>支持役次元 JSON、郊狼 V2/V3 以及 Dungeonlab 多小节 PULSE。</p></div>
           <label class="primary upload">导入波形<input type="file" accept=".json,.pulse,.pules,.txt" @change="importWaveform" /></label>
         </div>
         <div class="wave-library">
           <article v-for="wave in state.waveforms" :key="wave.name" class="wave-card panel">
             <div class="wave-preview">∿∿∿</div><h3>{{ wave.name }}</h3><p>{{ wave.source }} · {{ wave.points.length }} 点</p>
-            <div class="wave-bars"><i v-for="(point,index) in wave.points.slice(0,20)" :key="index" :style="{height: `${Math.max(4, point.pulse_width)}%`}"></i></div>
+            <svg class="wave-lines" viewBox="0 0 100 100" preserveAspectRatio="none">
+              <polyline class="pulse-line" :points="wavePath(wave.points, 'pulse_width')" />
+              <polyline class="frequency-line" :points="wavePath(wave.points, 'frequency')" />
+            </svg>
           </article>
         </div>
       </section>

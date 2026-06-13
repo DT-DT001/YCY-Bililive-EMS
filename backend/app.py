@@ -36,7 +36,9 @@ class Controller:
         self.waveforms = self._load_waveforms()
         self.websockets: set[web.WebSocketResponse] = set()
         self.events: list[dict] = []
-        self._last_device_outputs: dict[tuple[str, str], tuple[float, int, int]] = {}
+        self._last_device_outputs: dict[
+            tuple[str, str], tuple[float, int, int, int]
+        ] = {}
         self.devices = DeviceManager(
             self.config.device_generations, self.broadcast_state
         )
@@ -95,7 +97,7 @@ class Controller:
             self.websockets.discard(websocket)
 
     async def broadcast_state(self) -> None:
-        await self.broadcast("devices", self.devices.snapshot())
+        await self.broadcast("devices", self.device_snapshot())
 
     async def broadcast_listener(self, status: dict) -> None:
         await self.broadcast("listener", status)
@@ -103,7 +105,12 @@ class Controller:
     async def apply_output(
         self, device_id: str, channel: str, output: ChannelOutput
     ) -> None:
-        signature = (output.strength, output.frequency, output.pulse_width)
+        signature = (
+            output.strength,
+            output.mode,
+            output.frequency if output.mode == 0x11 else 0,
+            output.pulse_width if output.mode == 0x11 else 0,
+        )
         key = (device_id, channel)
         if self._last_device_outputs.get(key) != signature:
             self._last_device_outputs[key] = signature
@@ -125,9 +132,11 @@ class Controller:
                     "waveform": output.waveform,
                     "frequency": output.frequency,
                     "pulse_width": output.pulse_width,
+                    "mode": output.mode,
                     "event_name": output.event_name,
                     "queue_size": output.queue_size,
                     "history": output.history,
+                    "frequency_history": output.frequency_history,
                 },
             },
         )
@@ -157,11 +166,21 @@ class Controller:
         return {
             "config": self.config.to_dict(),
             "waveforms": [waveform.to_dict() for waveform in self.waveforms.values()],
-            "devices": self.devices.snapshot(),
+            "devices": self.device_snapshot(),
             "listener": self.listener.snapshot(),
             "events": self.events,
             "scheduler": self.scheduler.snapshot(),
         }
+
+    def device_snapshot(self) -> list[dict]:
+        devices = self.devices.snapshot()
+        by_id = {device["id"]: device for device in devices}
+        for scheduled in self.scheduler.snapshot():
+            device = by_id.get(scheduled["device_id"])
+            if not device:
+                continue
+            device.setdefault("outputs", {})[scheduled["channel"]] = scheduled["output"]
+        return devices
 
     def export_event_config(self) -> dict[str, Any]:
         rules = []
@@ -264,8 +283,9 @@ async def import_config(request: web.Request) -> web.Response:
 
 
 async def scan_devices(request: web.Request) -> web.Response:
-    devices = await request.app[CONTROLLER_KEY].devices.scan()
-    return web.json_response(devices)
+    controller = request.app[CONTROLLER_KEY]
+    await controller.devices.scan()
+    return web.json_response(controller.device_snapshot())
 
 
 async def device_action(request: web.Request) -> web.Response:

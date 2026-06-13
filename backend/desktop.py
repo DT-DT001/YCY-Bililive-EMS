@@ -46,9 +46,11 @@ class DesktopServer:
     def __init__(self) -> None:
         self.loop: asyncio.AbstractEventLoop | None = None
         self.runner: web.AppRunner | None = None
+        self.site: web.TCPSite | None = None
         self.thread: threading.Thread | None = None
         self.ready = threading.Event()
         self.error: BaseException | None = None
+        self.port: int | None = None
         self._stopping = threading.Lock()
 
     def start(self) -> None:
@@ -81,8 +83,13 @@ class DesktopServer:
     async def _start_server(self) -> None:
         self.runner = web.AppRunner(create_app())
         await self.runner.setup()
-        site = web.TCPSite(self.runner, "127.0.0.1", 8765)
-        await site.start()
+        self.site = web.TCPSite(self.runner, "127.0.0.1", 0)
+        await self.site.start()
+        server = self.site._server
+        sockets = server.sockets if server is not None else None
+        if not sockets:
+            raise RuntimeError("无法获取本地服务端口")
+        self.port = int(sockets[0].getsockname()[1])
 
     async def _close_server(self) -> None:
         if self.runner is not None:
@@ -135,9 +142,11 @@ def main() -> None:
     try:
         configure_windows_app_identity()
         server.start()
+        if server.port is None:
+            raise RuntimeError("本地服务未返回可用端口")
         window = webview.create_window(
             "YCY Live Pulse",
-            "http://127.0.0.1:8765",
+            f"http://127.0.0.1:{server.port}",
             js_api=DesktopApi(),
             width=1100,
             height=680,

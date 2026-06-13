@@ -35,9 +35,11 @@ class ChannelOutput:
     waveform: str = ""
     frequency: int = 1
     pulse_width: int = 0
+    mode: int = 0x11
     event_name: str = ""
     queue_size: int = 0
     history: list[float] = field(default_factory=list)
+    frequency_history: list[float] = field(default_factory=list)
 
 
 OutputCallback = Callable[[str, str, ChannelOutput], Awaitable[None]]
@@ -216,8 +218,20 @@ class ChannelScheduler:
                     idle_ticks += 1
                     self._point_index = 0
                     self._active_task_id = None
+                    fixed_mode_ended = 1 <= self.output.mode <= 16
                     self.output = ChannelOutput(
-                        history=(self.output.history + [0])[-HISTORY_SIZE:]
+                        history=(
+                            [0] * HISTORY_SIZE
+                            if fixed_mode_ended
+                            else (self.output.history + [0])[-HISTORY_SIZE:]
+                        ),
+                        frequency_history=(
+                            [0] * HISTORY_SIZE
+                            if fixed_mode_ended
+                            else (
+                                self.output.frequency_history + [0]
+                            )[-HISTORY_SIZE:]
+                        ),
                     )
                 else:
                     idle_ticks = 0
@@ -230,6 +244,7 @@ class ChannelScheduler:
                         continue
                     waveform_name = active.waveform
                     point = self._next_point(active)
+                    mode = self.waveforms[waveform_name].fixed_mode or 0x11
                     self.output = ChannelOutput(
                         strength=active.strength,
                         remaining=active.remaining,
@@ -239,9 +254,13 @@ class ChannelScheduler:
                         waveform=waveform_name,
                         frequency=point.frequency,
                         pulse_width=point.pulse_width,
+                        mode=mode,
                         event_name=active.event_name,
                         queue_size=len(self.tasks),
                         history=(self.output.history + [point.pulse_width])[-HISTORY_SIZE:],
+                        frequency_history=(
+                            self.output.frequency_history + [point.frequency]
+                        )[-HISTORY_SIZE:],
                     )
             await self.callback(self.device_id, self.channel, self.output)
             await asyncio.sleep(TICK_SECONDS)
@@ -261,7 +280,10 @@ class ChannelScheduler:
             self._active_task_id = None
             self._point_index = 0
             self.output = ChannelOutput(
-                history=(self.output.history + [0])[-HISTORY_SIZE:]
+                history=(self.output.history + [0])[-HISTORY_SIZE:],
+                frequency_history=(
+                    self.output.frequency_history + [0]
+                )[-HISTORY_SIZE:],
             )
         await self.callback(self.device_id, self.channel, self.output)
         self._last_tick = time.monotonic()

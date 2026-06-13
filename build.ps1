@@ -28,6 +28,7 @@ $iconPath = (Resolve-Path "logo/logo.ico").Path
   run.py
 
 Copy-Item "README.md" "dist/YCY-Bililive-EMS/README.md" -Force
+Copy-Item "CHANGELOG.md" "dist/YCY-Bililive-EMS/CHANGELOG.md" -Force
 
 $releaseDir = Join-Path (Get-Location) "release"
 New-Item -ItemType Directory -Path $releaseDir -Force | Out-Null

@@ -30,9 +30,13 @@ class ProtocolTests(unittest.TestCase):
         packet = generation1_control("AB", 0, 80, 60, mode=3)
         self.assertEqual(packet[2:9], bytes([3, 0, 0, 0, 0, 1, 0]))
 
-    def test_generation1_custom_zero_width_is_sent_as_safe_silence(self):
+    def test_generation1_custom_accepts_zero_pulse_time(self):
         packet = generation1_control("A", 50, 80, 0, mode=0x11)
-        self.assertEqual(packet[2:9], bytes([1, 0, 0, 0, 0, 1, 0]))
+        self.assertEqual(packet[2:9], bytes([1, 1, 0, 50, 0x11, 80, 0]))
+
+    def test_generation1_custom_sends_frequency_and_pulse_time(self):
+        packet = generation1_control("A", 50, 100, 100, mode=0x11)
+        self.assertEqual(packet[7:9], bytes([100, 100]))
 
     def test_generation2_fixed_mode_packet(self):
         packet = generation2_fixed(20, 1, 30, 12)

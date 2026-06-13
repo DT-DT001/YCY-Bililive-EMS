@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Awaitable, Callable
 
 from bleak import BleakClient, BleakScanner
+from bleak.backends.device import BLEDevice
 
 from .protocol import (
     NOTIFY_UUID,
@@ -21,10 +22,14 @@ from .scheduler import ChannelOutput
 
 
 DeviceCallback = Callable[[], Awaitable[None]]
-GENERATION1_MIN_WRITE_INTERVAL = 0.1
+# The protocol says 100 ms is the fastest update rate. A small guard interval
+# keeps Windows BLE scheduling jitter from landing on the firmware boundary.
+GENERATION1_MIN_WRITE_INTERVAL = 0.12
+GENERATION1_COALESCE_WINDOW = 0.01
 GENERATION1_ERROR_WINDOW = 5.0
 GENERATION1_ERROR_THRESHOLD = 3
 GENERATION1_RETRY_DELAY = 0.2
+CONNECT_DISCOVERY_TIMEOUT = 8.0
 
 
 @dataclass(slots=True)
@@ -44,20 +49,44 @@ class DeviceState:
 
 
 class DeviceConnection:
-    def __init__(self, state: DeviceState, notify_change: DeviceCallback) -> None:
+    def __init__(
+        self,
+        state: DeviceState,
+        notify_change: DeviceCallback,
+        ble_device: BLEDevice | None = None,
+    ) -> None:
         self.state = state
         self.notify_change = notify_change
+        self.ble_device = ble_device
         self.client: BleakClient | None = None
         self.outputs = {"A": ChannelOutput(), "B": ChannelOutput()}
         self._write_lock = asyncio.Lock()
         self._last_write_at = 0.0
         self._last_control_packet: bytes | None = None
+        self._last_generation1_payloads: dict[str, bytes] = {}
+        self._pending_generation1_packets: dict[str, bytes] = {}
+        self._generation1_writer_task: asyncio.Task | None = None
+        self._generation1_next_channel = "A"
         self._data_error_times: list[float] = []
         self._recovery_task: asyncio.Task | None = None
 
     async def connect(self) -> None:
-        self.client = BleakClient(self.state.id, disconnected_callback=self._disconnected)
+        self.state.error = ""
         try:
+            discovered = await BleakScanner.find_device_by_address(
+                self.state.id,
+                timeout=CONNECT_DISCOVERY_TIMEOUT,
+            )
+            if discovered is None:
+                raise RuntimeError(
+                    "未发现设备。请确认设备已开机且未连接其他程序，然后重新扫描。"
+                )
+            self.ble_device = discovered
+            self.state.name = discovered.name or self.state.name
+            self.client = BleakClient(
+                discovered,
+                disconnected_callback=self._disconnected,
+            )
             await self.client.connect()
             await self.client.start_notify(NOTIFY_UUID, self._notification)
             self.state.connected = True
@@ -65,9 +94,18 @@ class DeviceConnection:
             await self._query_state()
         except Exception as exc:
             self.state.connected = False
-            self.state.error = str(exc)
+            message = str(exc)
+            if "was not found" in message.lower():
+                message = (
+                    "未发现设备。请确认设备已开机且未连接其他程序，然后重新扫描。"
+                )
+            self.state.error = message
             if self.client:
-                await self.client.disconnect()
+                try:
+                    await self.client.disconnect()
+                except Exception:
+                    pass
+            self.client = None
             raise
         finally:
             await self.notify_change()
@@ -124,9 +162,12 @@ class DeviceConnection:
         ]
         self._data_error_times.append(now)
         if len(self._data_error_times) >= GENERATION1_ERROR_THRESHOLD:
+            packet_detail = self._describe_generation1_packet(
+                self._last_control_packet
+            )
             self.state.error = (
                 "设备连续拒绝控制数据（错误码 4：数据错误），自动重试未能恢复。"
-                "请断开设备后重新连接"
+                f"最近发送：{packet_detail}。请断开设备后重新连接"
             )
             return
         if self._recovery_task is None or self._recovery_task.done():
@@ -153,6 +194,21 @@ class DeviceConnection:
         except (asyncio.CancelledError, Exception):
             return
 
+    @staticmethod
+    def _describe_generation1_packet(packet: bytes | None) -> str:
+        if packet is None or len(packet) < 9 or packet[1] != 0x11:
+            return "未知报文"
+        channel = {1: "A", 2: "B", 3: "AB"}.get(packet[2], str(packet[2]))
+        strength = (packet[4] << 8) | packet[5]
+        if packet[3] == 0:
+            return f"{channel}通道关闭"
+        if packet[6] == 0x11:
+            return (
+                f"{channel}通道自定义模式，强度{strength}，"
+                f"{packet[7]}Hz/{packet[8]}us"
+            )
+        return f"{channel}通道固定模式{packet[6]}，强度{strength}"
+
     async def _write_generation1_packet(
         self,
         packet: bytes,
@@ -160,6 +216,8 @@ class DeviceConnection:
         remember: bool,
     ) -> None:
         if not self.client:
+            return
+        if remember and packet == self._last_control_packet:
             return
         now = asyncio.get_running_loop().time()
         delay = GENERATION1_MIN_WRITE_INTERVAL - (now - self._last_write_at)
@@ -169,6 +227,73 @@ class DeviceConnection:
         self._last_write_at = asyncio.get_running_loop().time()
         if remember:
             self._last_control_packet = packet
+            channel = {1: "A", 2: "B", 3: "AB"}.get(packet[2])
+            payload = packet[3:9]
+            if channel == "AB":
+                self._last_generation1_payloads["A"] = payload
+                self._last_generation1_payloads["B"] = payload
+            elif channel:
+                self._last_generation1_payloads[channel] = payload
+
+    def _queue_generation1_packet(self, channel: str, packet: bytes) -> None:
+        payload = packet[3:9]
+        already_applied = (
+            self._last_generation1_payloads.get("A") == payload
+            and self._last_generation1_payloads.get("B") == payload
+            if channel == "AB"
+            else self._last_generation1_payloads.get(channel) == payload
+        )
+        if already_applied:
+            self._pending_generation1_packets.pop(channel, None)
+            return
+        self._pending_generation1_packets[channel] = packet
+        if (
+            self._generation1_writer_task is None
+            or self._generation1_writer_task.done()
+        ):
+            self._generation1_writer_task = asyncio.create_task(
+                self._run_generation1_writer()
+            )
+
+    def _next_generation1_packet(self) -> tuple[str, bytes] | None:
+        for channel in (
+            self._generation1_next_channel,
+            "B" if self._generation1_next_channel == "A" else "A",
+            "AB",
+        ):
+            packet = self._pending_generation1_packets.pop(channel, None)
+            if packet is not None:
+                if channel in ("A", "B"):
+                    self._generation1_next_channel = (
+                        "B" if channel == "A" else "A"
+                    )
+                return channel, packet
+        return None
+
+    async def _run_generation1_writer(self) -> None:
+        try:
+            # A and B schedulers tick independently. Give both callbacks one
+            # event-loop window so matching states can become one AB packet.
+            await asyncio.sleep(GENERATION1_COALESCE_WINDOW)
+            while self.client and self.state.connected:
+                pending = self._next_generation1_packet()
+                if pending is None:
+                    return
+                channel, packet = pending
+                async with self._write_lock:
+                    await self._write_generation1_packet(
+                        packet,
+                        remember=True,
+                    )
+                # If a newer state arrived while this packet was waiting, keep
+                # it pending. Otherwise the last sent packet is authoritative.
+                if self._pending_generation1_packets.get(channel) == packet:
+                    self._pending_generation1_packets.pop(channel, None)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.state.error = str(exc)
+            await self.notify_change()
 
     async def _query_state(self) -> None:
         if not self.client:
@@ -192,10 +317,29 @@ class DeviceConnection:
         if not self.client or not self.state.connected:
             return
         self.outputs[channel] = output
+        if self.state.generation == 1:
+            a_packet = self._generation1_packet("A", self.outputs["A"])
+            b_packet = self._generation1_packet("B", self.outputs["B"])
+            if a_packet[3] == 1 and a_packet[3:9] == b_packet[3:9]:
+                self._pending_generation1_packets.pop("A", None)
+                self._pending_generation1_packets.pop("B", None)
+                self._queue_generation1_packet(
+                    "AB",
+                    generation1_control(
+                        "AB",
+                        (a_packet[4] << 8) | a_packet[5],
+                        a_packet[7],
+                        a_packet[8],
+                        a_packet[6],
+                    ),
+                )
+            else:
+                self._pending_generation1_packets.pop("AB", None)
+                packet = a_packet if channel == "A" else b_packet
+                self._queue_generation1_packet(channel, packet)
+            return
         async with self._write_lock:
             if self.state.generation == 1:
-                packet = self._generation1_packet(channel, output)
-                await self._write_generation1_packet(packet, remember=True)
                 return
             else:
                 a, b = self.outputs["A"], self.outputs["B"]
@@ -223,24 +367,6 @@ class DeviceConnection:
         channel: str,
         output: ChannelOutput,
     ) -> bytes:
-        a, b = self.outputs["A"], self.outputs["B"]
-        same_strength = round(a.strength) == round(b.strength)
-        same_mode = a.mode == b.mode
-        same_realtime = (
-            a.mode != 0x11
-            or (
-                a.frequency == b.frequency
-                and a.pulse_width == b.pulse_width
-            )
-        )
-        if same_strength and same_mode and same_realtime:
-            return generation1_control(
-                "AB",
-                round(a.strength),
-                a.frequency,
-                a.pulse_width,
-                a.mode,
-            )
         return generation1_control(
             channel,
             round(output.strength),
@@ -252,6 +378,16 @@ class DeviceConnection:
     async def disconnect(self) -> None:
         if self._recovery_task and not self._recovery_task.done():
             self._recovery_task.cancel()
+        if (
+            self._generation1_writer_task
+            and not self._generation1_writer_task.done()
+        ):
+            self._generation1_writer_task.cancel()
+            await asyncio.gather(
+                self._generation1_writer_task,
+                return_exceptions=True,
+            )
+        self._pending_generation1_packets.clear()
         if self.client:
             try:
                 if self.state.generation == 1:
@@ -320,7 +456,17 @@ class DeviceManager:
                 if address not in self.devices:
                     generation = self.generations.get(address, 2)
                     state = DeviceState(address, device.name or "EMS Device", generation)
-                    self.devices[address] = DeviceConnection(state, self.notify_change)
+                    self.devices[address] = DeviceConnection(
+                        state,
+                        self.notify_change,
+                        device,
+                    )
+                else:
+                    connection = self.devices[address]
+                    connection.ble_device = device
+                    connection.state.name = device.name or connection.state.name
+                    if not connection.state.connected:
+                        connection.state.error = ""
             return self.snapshot()
         finally:
             self.scanning = False

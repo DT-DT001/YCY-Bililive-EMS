@@ -6,6 +6,8 @@ from dataclasses import dataclass
 SERVICE_UUID = "0000ff30-0000-1000-8000-00805f9b34fb"
 WRITE_UUID = "0000ff31-0000-1000-8000-00805f9b34fb"
 NOTIFY_UUID = "0000ff32-0000-1000-8000-00805f9b34fb"
+GENERATION1_CUSTOM_MAX_FREQUENCY = 100
+GENERATION1_CUSTOM_MAX_PULSE_WIDTH = 100
 
 
 def checksum(payload: bytes | bytearray) -> int:
@@ -27,8 +29,6 @@ def generation1_control(
 ) -> bytes:
     channel_code = {"A": 1, "B": 2, "AB": 3}[channel]
     strength = max(0, min(276, strength))
-    if mode == 0x11 and pulse_width <= 0:
-        strength = 0
     enabled = int(strength > 0)
     if not enabled:
         return with_checksum(
@@ -44,8 +44,12 @@ def generation1_control(
             strength >> 8,
             strength & 0xFF,
             fixed_mode,
-            max(1, min(100, frequency)) if fixed_mode == 0x11 else 0,
-            max(0, min(100, pulse_width)) if fixed_mode == 0x11 else 0,
+            max(1, min(GENERATION1_CUSTOM_MAX_FREQUENCY, frequency))
+            if fixed_mode == 0x11
+            else 0,
+            max(0, min(GENERATION1_CUSTOM_MAX_PULSE_WIDTH, pulse_width))
+            if fixed_mode == 0x11
+            else 0,
         ]
     )
 

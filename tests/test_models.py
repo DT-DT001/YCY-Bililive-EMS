@@ -62,6 +62,73 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(duration, 7)
         self.assertEqual(increment, 2)
 
+    def test_calculation_never_exceeds_device_strength_range(self):
+        rule = EventRule(
+            id="gift",
+            name="gift",
+            event_type="gift",
+            base_strength=500,
+            strength_rate=100,
+            strength_limit=999,
+        )
+
+        strength, _, _ = rule.calculate(10)
+
+        self.assertEqual(strength, 276)
+
+    def test_nonfinite_values_cannot_create_unbounded_output(self):
+        rule = EventRule(
+            id="unsafe",
+            name="unsafe",
+            event_type="gift",
+            base_strength=float("inf"),
+            base_duration=float("inf"),
+            strength_rate=float("nan"),
+            duration_rate=float("inf"),
+            strength_limit=float("inf"),
+            duration_limit=float("inf"),
+        )
+
+        self.assertEqual(rule.calculate(float("inf")), (0, 0, 0))
+
+    def test_invalid_targets_are_discarded(self):
+        rule = EventRule.from_dict(
+            {
+                "id": "target-test",
+                "name": "target-test",
+                "event_type": "gift",
+                "targets": [
+                    {"device_id": "device", "channel": "A"},
+                    {"device_id": "device", "channel": "C"},
+                    {"channel": "B"},
+                ],
+            }
+        )
+
+        self.assertEqual(rule.targets, [ChannelTarget("device", "A")])
+
+    def test_duplicate_rule_ids_are_not_loaded_twice(self):
+        config = AppConfig.from_dict(
+            {
+                "rules": [
+                    {
+                        "id": "gift:normal",
+                        "name": "first",
+                        "event_type": "gift",
+                    },
+                    {
+                        "id": "gift:normal",
+                        "name": "duplicate",
+                        "event_type": "gift",
+                    },
+                ]
+            }
+        )
+
+        matches = [rule for rule in config.rules if rule.id == "gift:normal"]
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0].name, "first")
+
     def test_keyword_and_tier_matching(self):
         controller = Controller()
         rule = EventRule(

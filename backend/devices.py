@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from dataclasses import asdict, dataclass, field
 from typing import Awaitable, Callable
 
@@ -30,6 +31,12 @@ GENERATION1_ERROR_WINDOW = 5.0
 GENERATION1_ERROR_THRESHOLD = 3
 GENERATION1_RETRY_DELAY = 0.2
 CONNECT_DISCOVERY_TIMEOUT = 8.0
+
+
+def protocol_strength(value: float) -> int:
+    if not math.isfinite(value):
+        return 0
+    return max(0, min(276, math.floor(value + 0.5)))
 
 
 @dataclass(slots=True)
@@ -63,6 +70,7 @@ class DeviceConnection:
         self._write_lock = asyncio.Lock()
         self._last_write_at = 0.0
         self._last_control_packet: bytes | None = None
+        self._last_generation2_packet: bytes | None = None
         self._last_generation1_payloads: dict[str, bytes] = {}
         self._pending_generation1_packets: dict[str, bytes] = {}
         self._generation1_writer_task: asyncio.Task | None = None
@@ -72,6 +80,18 @@ class DeviceConnection:
 
     async def connect(self) -> None:
         self.state.error = ""
+        if (
+            self._generation1_writer_task
+            and not self._generation1_writer_task.done()
+        ):
+            self._generation1_writer_task.cancel()
+            await asyncio.gather(
+                self._generation1_writer_task,
+                return_exceptions=True,
+            )
+        if self._recovery_task and not self._recovery_task.done():
+            self._recovery_task.cancel()
+        self._reset_protocol_state()
         try:
             discovered = await BleakScanner.find_device_by_address(
                 self.state.id,
@@ -110,8 +130,25 @@ class DeviceConnection:
         finally:
             await self.notify_change()
 
+    def _reset_protocol_state(self) -> None:
+        self._last_write_at = 0.0
+        self._last_control_packet = None
+        self._last_generation2_packet = None
+        self._last_generation1_payloads.clear()
+        self._pending_generation1_packets.clear()
+        self._generation1_next_channel = "A"
+        self._data_error_times.clear()
+
     def _disconnected(self, _client: BleakClient) -> None:
         self.state.connected = False
+        self._pending_generation1_packets.clear()
+        if (
+            self._generation1_writer_task
+            and not self._generation1_writer_task.done()
+        ):
+            self._generation1_writer_task.cancel()
+        if self._recovery_task and not self._recovery_task.done():
+            self._recovery_task.cancel()
         asyncio.create_task(self.notify_change())
 
     def _notification(self, _sender, data: bytearray) -> None:
@@ -320,18 +357,15 @@ class DeviceConnection:
         if self.state.generation == 1:
             a_packet = self._generation1_packet("A", self.outputs["A"])
             b_packet = self._generation1_packet("B", self.outputs["B"])
-            if a_packet[3] == 1 and a_packet[3:9] == b_packet[3:9]:
+            if a_packet[3:9] == b_packet[3:9]:
                 self._pending_generation1_packets.pop("A", None)
                 self._pending_generation1_packets.pop("B", None)
+                combined = bytearray(a_packet)
+                combined[2] = 3
+                combined[-1] = sum(combined[:-1]) & 0xFF
                 self._queue_generation1_packet(
                     "AB",
-                    generation1_control(
-                        "AB",
-                        (a_packet[4] << 8) | a_packet[5],
-                        a_packet[7],
-                        a_packet[8],
-                        a_packet[6],
-                    ),
+                    bytes(combined),
                 )
             else:
                 self._pending_generation1_packets.pop("AB", None)
@@ -346,21 +380,24 @@ class DeviceConnection:
                 active = [item for item in (a, b) if item.strength > 0]
                 if active and all(item.mode != 0x11 for item in active):
                     packet = generation2_fixed(
-                        round(a.strength),
+                        protocol_strength(a.strength),
                         a.mode if a.mode != 0x11 else 1,
-                        round(b.strength),
+                        protocol_strength(b.strength),
                         b.mode if b.mode != 0x11 else 1,
                     )
                 else:
                     packet = generation2_realtime(
-                        round(a.strength),
+                        protocol_strength(a.strength),
                         a.frequency,
                         a.pulse_width,
-                        round(b.strength),
+                        protocol_strength(b.strength),
                         b.frequency,
                         b.pulse_width,
                     )
+            if packet == self._last_generation2_packet:
+                return
             await self.client.write_gatt_char(WRITE_UUID, packet, response=False)
+            self._last_generation2_packet = packet
 
     def _generation1_packet(
         self,
@@ -369,7 +406,7 @@ class DeviceConnection:
     ) -> bytes:
         return generation1_control(
             channel,
-            round(output.strength),
+            protocol_strength(output.strength),
             output.frequency,
             output.pulse_width,
             output.mode,
@@ -427,6 +464,7 @@ class DeviceConnection:
             finally:
                 self.state.connected = False
                 self.client = None
+                self._reset_protocol_state()
                 await self.notify_change()
 
 
@@ -482,15 +520,24 @@ class DeviceManager:
         if generation not in (1, 2):
             raise ValueError("generation must be 1 or 2")
         connection = self.devices[device_id]
+        if connection.state.connected:
+            raise RuntimeError("请先断开设备，再切换产品代际")
         connection.state.generation = generation
         connection.state.error = ""
         self.generations[device_id] = generation
         await self.notify_change()
 
-    async def write_output(self, device_id: str, channel: str, output: ChannelOutput) -> None:
+    async def write_output(
+        self,
+        device_id: str,
+        channel: str,
+        output: ChannelOutput,
+    ) -> bool:
         connection = self.devices.get(device_id)
-        if connection:
-            await connection.write_output(channel, output)
+        if not connection or not connection.state.connected:
+            return False
+        await connection.write_output(channel, output)
+        return True
 
     async def close(self) -> None:
         await asyncio.gather(

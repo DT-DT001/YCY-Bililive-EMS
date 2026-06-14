@@ -20,6 +20,33 @@ class BilibiliTests(unittest.TestCase):
         self.assertEqual(event.value, 10)
         self.assertEqual(event.tier, "admiral")
 
+    def test_gift_tier_can_come_from_medal_info(self):
+        event = normalize_message(
+            {
+                "cmd": "SEND_GIFT",
+                "data": {
+                    "uname": "tester",
+                    "total_coin": 1000,
+                    "medal_info": {"guard_level": 3},
+                },
+            }
+        )
+        self.assertEqual(event.tier, "captain")
+
+    def test_like_uses_click_count_and_nested_guard_level(self):
+        event = normalize_message(
+            {
+                "cmd": "LIKE_INFO_V3_CLICK",
+                "data": {
+                    "uname": "tester",
+                    "click_count": 18,
+                    "fans_medal": {"guard_level": 2},
+                },
+            }
+        )
+        self.assertEqual(event.value, 18)
+        self.assertEqual(event.tier, "admiral")
+
     def test_guard_mapping(self):
         event = normalize_message(
             {"cmd": "GUARD_BUY", "data": {"username": "u", "guard_level": 1}}
@@ -79,9 +106,10 @@ class BilibiliReconnectTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         FakeLiveDanmaku.instances = []
         self.statuses = []
+        self.events = []
 
-        async def on_event(_event):
-            return None
+        async def on_event(event):
+            self.events.append(event)
 
         async def on_status(status):
             self.statuses.append(status.copy())
@@ -121,6 +149,31 @@ class BilibiliReconnectTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.listener.connecting)
         self.assertEqual(self.listener.error, "")
         self.assertEqual(self.listener._retry_delay, 0.01)
+
+    async def test_guard_purchase_and_toast_for_same_transaction_trigger_once(self):
+        await self.listener.start("1826512")
+        await self.wait_for_instances(1)
+        client = FakeLiveDanmaku.instances[0]
+        transaction = {
+            "uid": 123,
+            "username": "tester",
+            "guard_level": 3,
+            "num": 1,
+            "start_time": 1000,
+            "end_time": 2000,
+        }
+
+        await client.emit(
+            "ALL",
+            {"data": {"cmd": "GUARD_BUY", "data": transaction}},
+        )
+        await client.emit(
+            "ALL",
+            {"data": {"cmd": "USER_TOAST_MSG", "data": transaction}},
+        )
+
+        self.assertEqual(len(self.events), 1)
+        self.assertEqual(self.events[0].event_type, "guard_captain")
 
 
 if __name__ == "__main__":

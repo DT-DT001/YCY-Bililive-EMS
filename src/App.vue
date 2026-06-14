@@ -838,11 +838,11 @@ onBeforeUnmount(() => {
               <div class="form-grid">
                 <label v-if="rule.event_type === 'danmu'">触发弹幕<input v-model="rule.keyword" placeholder="留空表示任意弹幕" /></label>
                 <label v-if="['danmu','like','gift','enter','leave','follow','unfollow','share'].includes(rule.event_type)">用户身份<select v-model="rule.tier"><option v-for="(name,key) in tierNames" :key="key" :value="key">{{ name }}</option></select></label>
-                <label>基础强度<input type="number" min="0" max="276" v-model.number="rule.base_strength" /></label>
+                <label>基础强度（0-276）<input type="number" min="0" max="276" v-model.number="rule.base_strength" /></label>
                 <label>基础时间（秒）<input type="number" min="0" step=".1" v-model.number="rule.base_duration" /></label>
                 <label>强度增幅率<input type="number" min="0" step=".01" v-model.number="rule.strength_rate" /></label>
                 <label>时间增幅率<input type="number" min="0" step=".01" v-model.number="rule.duration_rate" /></label>
-                <label>强度上限<input type="number" min="0" max="276" v-model.number="rule.strength_limit" /></label>
+                <label>强度上限（0-276）<input type="number" min="0" max="276" v-model.number="rule.strength_limit" /></label>
                 <label>时间上限（秒）<input type="number" min="0" step=".1" v-model.number="rule.duration_limit" /></label>
               </div>
               <div class="editor-section">

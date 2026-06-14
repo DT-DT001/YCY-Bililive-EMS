@@ -278,6 +278,40 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
             selected.append(task.waveform)
         self.assertEqual(selected, ["心跳", "潮汐", "连击", "心跳"])
 
+    async def test_new_sequence_event_starts_from_first_selected_waveform(self):
+        rule = self.rule("ordered-restart", 20, duration=0.12, rate=0)
+        rule.waveforms = ["心跳", "潮汐", "连击"]
+        rule.play_mode = "sequence"
+
+        await self.scheduler.trigger(rule, 0)
+        self.assertEqual(self.scheduler.tasks[0].waveform, "心跳")
+        await asyncio.sleep(0.25)
+        await self.scheduler.trigger(rule, 0)
+
+        self.assertEqual(self.scheduler.tasks[0].waveform, "心跳")
+
+    async def test_slow_callback_does_not_extend_event_duration(self):
+        outputs = []
+
+        async def slow_callback(_device, _channel, output):
+            outputs.append(output.strength)
+            if output.strength:
+                await asyncio.sleep(0.3)
+
+        scheduler = ChannelScheduler(
+            "slow",
+            "A",
+            builtin_waveforms(),
+            slow_callback,
+        )
+        try:
+            await scheduler.trigger(self.rule("slow", 20, duration=0.2, rate=0), 0)
+            await asyncio.sleep(0.45)
+            self.assertEqual(scheduler.tasks, [])
+            self.assertEqual(scheduler.output.strength, 0)
+        finally:
+            await scheduler.close()
+
     async def test_builtin_waveform_reports_protocol_fixed_mode(self):
         rule = self.rule("builtin", 20)
         rule.waveforms = ["潮汐"]

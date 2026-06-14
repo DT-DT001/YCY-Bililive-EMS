@@ -108,14 +108,15 @@ class Controller:
         signature = (
             output.strength,
             output.mode,
-            output.frequency if output.mode == 0x11 else 0,
-            output.pulse_width if output.mode == 0x11 else 0,
+            output.frequency,
+            output.pulse_width,
         )
         key = (device_id, channel)
         if self._last_device_outputs.get(key) != signature:
-            self._last_device_outputs[key] = signature
             try:
-                await self.devices.write_output(device_id, channel, output)
+                applied = await self.devices.write_output(device_id, channel, output)
+                if applied:
+                    self._last_device_outputs[key] = signature
             except Exception as exc:
                 connection = self.devices.devices.get(device_id)
                 if connection:
@@ -204,10 +205,15 @@ class Controller:
             for rule in self.config.rules
         }
         imported_rules = []
+        imported_ids: set[str] = set()
         for raw in payload["rules"]:
             if not isinstance(raw, dict) or not raw.get("id"):
                 raise ValueError("配置文件包含无效的事件规则")
             item = dict(raw)
+            rule_id = str(item["id"])
+            if rule_id in imported_ids:
+                raise ValueError(f"配置文件包含重复的事件规则 ID：{rule_id}")
+            imported_ids.add(rule_id)
             item["targets"] = current_targets.get(str(item["id"]), [])
             imported_rules.append(item)
         imported_config = AppConfig.from_dict(
@@ -294,8 +300,12 @@ async def device_action(request: web.Request) -> web.Response:
     action = request.match_info["action"]
     if action == "connect":
         await controller.devices.connect(device_id)
+        controller._last_device_outputs.pop((device_id, "A"), None)
+        controller._last_device_outputs.pop((device_id, "B"), None)
     elif action == "disconnect":
         await controller.devices.disconnect(device_id)
+        controller._last_device_outputs.pop((device_id, "A"), None)
+        controller._last_device_outputs.pop((device_id, "B"), None)
     else:
         raise web.HTTPBadRequest(text="unknown action")
     return web.json_response({"ok": True})
@@ -305,7 +315,10 @@ async def device_generation(request: web.Request) -> web.Response:
     controller = request.app[CONTROLLER_KEY]
     device_id = request.match_info["device_id"]
     raw = await request.json()
-    await controller.devices.set_generation(device_id, int(raw["generation"]))
+    try:
+        await controller.devices.set_generation(device_id, int(raw["generation"]))
+    except (KeyError, TypeError, ValueError, RuntimeError) as exc:
+        raise web.HTTPBadRequest(text=str(exc)) from exc
     controller.save()
     return web.json_response({"ok": True})
 
@@ -400,6 +413,8 @@ async def upload_waveform(request: web.Request) -> web.Response:
         controller.save()
         await controller.broadcast("waveforms", [item.to_dict() for item in controller.waveforms.values()])
         return web.json_response(waveform.to_dict())
+    except (ValueError, TypeError, OverflowError, json.JSONDecodeError) as exc:
+        raise web.HTTPBadRequest(text=str(exc)) from exc
     finally:
         temp_path.unlink(missing_ok=True)
 

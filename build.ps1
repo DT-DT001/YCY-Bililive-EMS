@@ -37,6 +37,9 @@ $iconPath = (Resolve-Path "logo/logo.ico").Path
   --collect-all "bleak" `
   --collect-all "bilibili_api" `
   --collect-all "webview" `
+  --exclude-module "PySide6" `
+  --exclude-module "shiboken6" `
+  --exclude-module "qtpy" `
   run.py
 
 Copy-Item "README.md" "dist/YCY-Bililive-EMS/README.md" -Force

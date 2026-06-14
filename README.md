@@ -2,7 +2,7 @@
 
 面向 Windows 的 B 站直播事件 EMS 控制台。程序使用 Python、Vue 3 和 pywebview 开发，可以监听指定直播间，并根据弹幕、点赞、礼物、上舰等事件控制多台役次元一代或二代双通道设备。
 
-当前版本：`v1.1.1`。面向普通用户的完整中文操作教程参见 [USER_GUIDE.zh-CN.md](USER_GUIDE.zh-CN.md)，版本变更参见 [CHANGELOG.md](CHANGELOG.md)。
+当前版本：`v1.1.3`。面向普通用户的完整中文操作教程参见 [USER_GUIDE.zh-CN.md](USER_GUIDE.zh-CN.md)，版本变更参见 [CHANGELOG.md](CHANGELOG.md)。
 
 程序使用内置 WebView2 窗口，不依赖外部浏览器。关闭窗口或点击“退出程序”时，会停止所有通道输出并主动断开蓝牙设备。
 

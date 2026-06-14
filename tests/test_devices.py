@@ -312,6 +312,61 @@ class DeviceDisconnectTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(client.writes), 1)
 
+    async def test_generation1_reconnect_does_not_reuse_old_packet_cache(self):
+        async def changed():
+            return None
+
+        connection = DeviceConnection(DeviceState("id", "name", 1, connected=True), changed)
+        old_client = FakeClient()
+        connection.client = old_client
+        output = ChannelOutput(strength=20, frequency=40, pulse_width=30)
+        await connection.write_output("A", output)
+        await asyncio.sleep(0.02)
+        self.assertEqual(len(old_client.writes), 1)
+
+        connection._reset_protocol_state()
+        new_client = FakeClient()
+        connection.client = new_client
+        await connection.write_output("A", output)
+        await asyncio.sleep(0.02)
+
+        self.assertEqual(len(new_client.writes), 1)
+
+    async def test_generation1_disconnect_callback_cancels_pending_writer(self):
+        async def changed():
+            return None
+
+        connection = DeviceConnection(DeviceState("id", "name", 1, connected=True), changed)
+        client = FakeClient()
+        connection.client = client
+        connection._last_write_at = asyncio.get_running_loop().time()
+        await connection.write_output(
+            "A",
+            ChannelOutput(strength=20, frequency=40, pulse_width=30),
+        )
+        await asyncio.sleep(0.02)
+        writer = connection._generation1_writer_task
+
+        connection._disconnected(client)
+        await asyncio.sleep(0)
+
+        self.assertTrue(writer.cancelled() or writer.done())
+        self.assertEqual(connection._pending_generation1_packets, {})
+
+    async def test_generation1_matching_idle_channels_use_one_ab_stop(self):
+        async def changed():
+            return None
+
+        connection = DeviceConnection(DeviceState("id", "name", 1, connected=True), changed)
+        client = FakeClient()
+        connection.client = client
+
+        await connection.write_output("A", ChannelOutput())
+        await asyncio.sleep(0.02)
+
+        self.assertEqual(len(client.writes), 1)
+        self.assertEqual(client.writes[0][1][2:9], bytes([3, 0, 0, 0, 0, 1, 0]))
+
     async def test_generation1_coalesces_old_points_per_channel(self):
         async def changed():
             return None
@@ -358,6 +413,52 @@ class DeviceDisconnectTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(packet[2], 0x01)
         self.assertEqual(packet[3:6], bytes([0, 20, 1]))
         self.assertEqual(packet[6:9], bytes([0, 30, 12]))
+
+    async def test_generation2_deduplicates_identical_packets(self):
+        async def changed():
+            return None
+
+        connection = DeviceConnection(DeviceState("id", "name", 2, connected=True), changed)
+        client = FakeClient()
+        connection.client = client
+        output = ChannelOutput(strength=20, mode=1)
+
+        await connection.write_output("A", output)
+        await connection.write_output("A", output)
+
+        self.assertEqual(len(client.writes), 1)
+
+    async def test_strength_half_is_rounded_up_for_both_generations(self):
+        async def changed():
+            return None
+
+        first = DeviceConnection(DeviceState("one", "name", 1, connected=True), changed)
+        first_client = FakeClient()
+        first.client = first_client
+        await first.write_output("A", ChannelOutput(strength=20.5, mode=1))
+        await asyncio.sleep(0.02)
+        self.assertEqual((first_client.writes[-1][1][4] << 8) | first_client.writes[-1][1][5], 21)
+
+        second = DeviceConnection(DeviceState("two", "name", 2, connected=True), changed)
+        second_client = FakeClient()
+        second.client = second_client
+        await second.write_output("A", ChannelOutput(strength=20.5, mode=1))
+        self.assertEqual((second_client.writes[-1][1][3] << 8) | second_client.writes[-1][1][4], 21)
+
+    async def test_connected_device_cannot_switch_protocol_generation(self):
+        async def changed():
+            return None
+
+        from backend.devices import DeviceManager
+
+        manager = DeviceManager()
+        manager.devices["id"] = DeviceConnection(
+            DeviceState("id", "name", 1, connected=True),
+            changed,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "先断开设备"):
+            await manager.set_generation("id", 2)
 
     async def test_single_error_code_four_is_retried_without_user_warning(self):
         changed_count = 0

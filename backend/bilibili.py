@@ -93,12 +93,23 @@ def normalize_message(message: dict[str, Any]) -> LiveEvent | None:
         )
 
     if command == "LIKE_INFO_V3_CLICK":
-        guard = data.get("guard_level") or _nested(data, "fans_medal", "guard_level")
+        guard = (
+            data.get("guard_level")
+            or _nested(data, "fans_medal", "guard_level")
+            or _nested(data, "fans_medal_info", "guard_level")
+            or _nested(data, "medal_info", "guard_level")
+        )
         return LiveEvent(
             "like",
             str(data.get("uname", "")),
             tier_from_guard(guard),
-            float(data.get("like_count", 1) or 1),
+            float(
+                data.get(
+                    "click_count",
+                    data.get("count", data.get("like_count", 1)),
+                )
+                or 1
+            ),
             "",
             command,
             now,
@@ -111,7 +122,11 @@ def normalize_message(message: dict[str, Any]) -> LiveEvent | None:
         return LiveEvent(
             "gift",
             str(data.get("uname", "")),
-            tier_from_guard(data.get("guard_level")),
+            tier_from_guard(
+                data.get("guard_level")
+                or _nested(data, "medal_info", "guard_level")
+                or _nested(data, "fans_medal", "guard_level")
+            ),
             battery,
             str(data.get("giftName", "")),
             command,
@@ -163,6 +178,7 @@ class BilibiliListener:
         self._stop_requested = True
         self._retry_base = max(0.01, retry_base)
         self._retry_delay = self._retry_base
+        self._recent_guard_transactions: dict[tuple[str, ...], tuple[str, float]] = {}
 
     async def start(self, room_id: str) -> None:
         await self.stop()
@@ -199,7 +215,7 @@ class BilibiliListener:
             if not isinstance(raw, dict):
                 return
             normalized = normalize_message(raw)
-            if normalized:
+            if normalized and not self._is_duplicate_guard_event(raw, normalized):
                 await self.on_event(normalized)
 
         @client.on("TIMEOUT")
@@ -211,6 +227,38 @@ class BilibiliListener:
             self.error = "直播间心跳超时，正在自动重连"
             await self.on_status(self.snapshot())
             reconnect_event.set()
+
+    def _is_duplicate_guard_event(
+        self,
+        raw: dict[str, Any],
+        event: LiveEvent,
+    ) -> bool:
+        if not event.event_type.startswith("guard_"):
+            return False
+        command = event.raw_command
+        data = raw.get("data") or {}
+        if not isinstance(data, dict):
+            return False
+        now = time.monotonic()
+        self._recent_guard_transactions = {
+            key: value
+            for key, value in self._recent_guard_transactions.items()
+            if now - value[1] <= 30
+        }
+        key = (
+            event.event_type,
+            str(data.get("uid", event.username)),
+            str(data.get("start_time", "")),
+            str(data.get("end_time", "")),
+            str(data.get("num", event.value)),
+        )
+        previous = self._recent_guard_transactions.get(key)
+        self._recent_guard_transactions[key] = (command, now)
+        return bool(
+            previous
+            and previous[0] != command
+            and now - previous[1] <= 10
+        )
 
     async def _disconnect_client(self, client: live.LiveDanmaku) -> None:
         try:
@@ -291,6 +339,7 @@ class BilibiliListener:
         self.connected = False
         self.connecting = False
         self.error = ""
+        self._recent_guard_transactions.clear()
         await self.on_status(self.snapshot())
 
     def snapshot(self) -> dict:

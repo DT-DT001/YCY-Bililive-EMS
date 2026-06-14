@@ -7,7 +7,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Awaitable, Callable
 
-from .models import EventRule
+from .models import MAX_DEVICE_STRENGTH, EventRule, nonnegative_finite
 from .waveforms import Waveform
 
 
@@ -62,7 +62,6 @@ class ChannelScheduler:
         self.tasks: list[OutputTask] = []
         self.output = ChannelOutput()
         self._sequence = 0
-        self._wave_indices: dict[str, int] = {}
         self._random_bags: dict[str, list[str]] = {}
         self._last_random_wave: dict[str, str] = {}
         self._point_index = 0
@@ -107,11 +106,7 @@ class ChannelScheduler:
             self._random_bags[rule.id] = bag
             self._last_random_wave[rule.id] = selected
             return selected
-        index = self._wave_indices.get(rule.id, 0)
-        selected = available[index % len(available)]
-        if rule.play_mode == "sequence":
-            self._wave_indices[rule.id] = index + 1
-        return selected
+        return available[0]
 
     def _advance_waveform(self, active: OutputTask) -> None:
         available = self._available_waveforms(active.waveforms or [active.waveform])
@@ -134,13 +129,16 @@ class ChannelScheduler:
         active.waveform = available[(index + 1) % len(available)]
 
     async def trigger(self, rule: EventRule, value: float) -> None:
-        event_value = max(0.0, float(value))
+        event_value = nonnegative_finite(value)
         initial_strength, initial_duration, duration_increment = rule.calculate(
             event_value
         )
-        strength_limit = max(0.0, float(rule.strength_limit))
-        duration_limit = max(0.0, float(rule.duration_limit))
-        strength_increment = event_value * max(0.0, float(rule.strength_rate))
+        strength_limit = min(
+            MAX_DEVICE_STRENGTH,
+            nonnegative_finite(rule.strength_limit),
+        )
+        duration_limit = nonnegative_finite(rule.duration_limit)
+        strength_increment = event_value * nonnegative_finite(rule.strength_rate)
         if initial_strength <= 0 or initial_duration <= 0:
             return
         async with self._lock:
@@ -211,7 +209,7 @@ class ChannelScheduler:
         idle_ticks = 0
         while self.tasks or idle_ticks < HISTORY_SIZE:
             now = time.monotonic()
-            elapsed = min(0.25, now - self._last_tick)
+            elapsed = max(0.0, now - self._last_tick)
             self._last_tick = now
             async with self._lock:
                 if not self.tasks:

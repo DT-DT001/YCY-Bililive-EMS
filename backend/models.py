@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+import math
 from typing import Any
 
 
@@ -9,6 +10,15 @@ TIER_LABELS = dict(zip(TIERS, ("普通用户", "舰长", "提督", "总督")))
 PLAY_MODES = ("loop", "sequence", "random")
 TIERED_EVENT_TYPES = ("danmu", "like", "gift", "enter", "leave", "follow", "unfollow", "share")
 UNAVAILABLE_EVENT_TYPES = ("leave", "unfollow")
+MAX_DEVICE_STRENGTH = 276.0
+
+
+def nonnegative_finite(value: Any) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return number if math.isfinite(number) and number > 0 else 0.0
 
 
 @dataclass(slots=True)
@@ -38,7 +48,13 @@ class EventRule:
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "EventRule":
         data = dict(raw)
-        data["targets"] = [ChannelTarget(**target) for target in data.get("targets", [])]
+        data["targets"] = [
+            ChannelTarget(str(target["device_id"]), str(target["channel"]))
+            for target in data.get("targets", [])
+            if isinstance(target, dict)
+            and target.get("device_id")
+            and target.get("channel") in ("A", "B")
+        ]
         waveforms = list(data.get("waveforms") or ["潮汐"])
         data["waveforms"] = waveforms
         if len(waveforms) == 1:
@@ -48,14 +64,20 @@ class EventRule:
         return cls(**data)
 
     def calculate(self, value: float) -> tuple[float, float, float]:
-        event_value = max(0.0, float(value))
-        strength_limit = max(0.0, float(self.strength_limit))
-        duration_limit = max(0.0, float(self.duration_limit))
-        base_strength = max(0.0, float(self.base_strength))
-        base_duration = max(0.0, float(self.base_duration))
-        strength_increment = event_value * max(0.0, float(self.strength_rate))
-        requested_duration_increment = event_value * max(
-            0.0, float(self.duration_rate)
+        event_value = nonnegative_finite(value)
+        strength_limit = min(
+            MAX_DEVICE_STRENGTH,
+            nonnegative_finite(self.strength_limit),
+        )
+        duration_limit = nonnegative_finite(self.duration_limit)
+        base_strength = min(
+            MAX_DEVICE_STRENGTH,
+            nonnegative_finite(self.base_strength),
+        )
+        base_duration = nonnegative_finite(self.base_duration)
+        strength_increment = event_value * nonnegative_finite(self.strength_rate)
+        requested_duration_increment = event_value * nonnegative_finite(
+            self.duration_rate
         )
 
         strength = min(strength_limit, base_strength + strength_increment)
@@ -117,11 +139,17 @@ class AppConfig:
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "AppConfig":
         rules_raw = raw.get("rules")
-        existing = (
-            [EventRule.from_dict(rule) for rule in rules_raw]
-            if isinstance(rules_raw, list)
-            else []
-        )
+        existing: list[EventRule] = []
+        seen_ids: set[str] = set()
+        if isinstance(rules_raw, list):
+            for rule_raw in rules_raw:
+                if not isinstance(rule_raw, dict):
+                    continue
+                rule = EventRule.from_dict(rule_raw)
+                if not rule.id or rule.id in seen_ids:
+                    continue
+                existing.append(rule)
+                seen_ids.add(rule.id)
         known_ids = {rule.id for rule in existing}
         rules = existing + [rule for rule in default_rules() if rule.id not in known_ids]
         return cls(
